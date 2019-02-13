@@ -1,0 +1,2 @@
+В коммандной строке после MediaInfo '/home/user/path/to/file.(*. video 
+type)'
