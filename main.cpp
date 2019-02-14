@@ -1,137 +1,156 @@
+extern "C"{
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libswscale/swscale.h>
+}
+
 #include <iostream>
+
+void SaveFrame(AVFrame * pFrame, int width, int height, int iFrame)
+{
+    FILE *pFile;
+    char szFileName[32];
+    int y;
+    
+    // Открываем файл
+    sprintf(szFileName, "frame%d.ppm", iFrame);
+    pFile = fopen(szFileName, "wb");
+    if (pFile == NULL)
+        return;
+    
+    //Записываем заголовок
+    fprintf(pFile, "P6\n%d %d\n255\n", width, height);
+    
+    //Записываем данные пикселя
+    for (y = 0; y < height; y++)
+        fwrite(pFrame->data[0] + y * pFrame->linesize[0], 1 , width*3, pFile);
+    
+    //Закрываем файл
+    fclose(pFile);
+}
 
 using namespace std;
 
-extern "C"
-{
-    #include <libavcodec/avcodec.h>
-    #include <libavformat/avformat.h>
-    #include <libswscale/swscale.h>
-    #include <libswscale/version.h>
-}
-
-void SaveFrame(AVFrame *pFrame, int width, int height, int iFrame) {
-  FILE *pFile;
-  char szFilename[32];
-  int  y;
-
-  // Open file
-  sprintf(szFilename, "frame%d.ppm", iFrame);
-  pFile=fopen(szFilename, "wb");
-  if(pFile==NULL)
-    return;
-
-  // Write header
-  fprintf(pFile, "P6\n%d %d\n255\n", width, height);
-
-  // Write pixel data
-  for(y=0; y<height; y++)
-    fwrite(pFrame->data[0]+y*pFrame->linesize[0], 1, width*3, pFile);
-
-  // Close file
-  fclose(pFile);
-}
-
-int main(int argc, const char * argv[])
-{
-    av_register_all();
-    AVFormatContext * FormatCtx = nullptr;
-    if (argc < 2){
-        cout << "Enter Full file path." << endl;
-        return -1;
-    }
-    if (avformat_open_input(&FormatCtx, argv[1], NULL, NULL) != 0)
+int main(int argc, char **argv) {
+    
+    AVFormatContext *   pFormatCtx = nullptr;
+    int                 i, videoStream;
+    AVCodecContext  *   pCodecCtxOrig = nullptr;
+    AVCodecContext  *   pCodecCtx = nullptr;
+    AVCodec         *   pCodec = nullptr;
+    AVFrame         *   pFrame = nullptr;
+    AVFrame         *   pFrameRGB = nullptr;
+    AVPacket            packet;
+    int                 frameFinished;
+    int                 numBytes;
+    uint8_t         *   buffer = nullptr;
+    struct SwsContext * sws_ctx = nullptr;
+    
+    if (argc < 2)
     {
+        cout << "Please provide a movie file" << endl;
         return -1;
     }
-    if (avformat_find_stream_info(FormatCtx, NULL) < 0 )
+    
+    //Регестрируем все форматы и кодеки
+    av_register_all();
+    
+    //Открываем видео файл
+    if (avformat_open_input(&pFormatCtx, argv[1], NULL, NULL) != 0)
         return -1;
-    av_dump_format(FormatCtx, 0, argv[1], 0);
-
-    int video_stream = -1;
-    AVCodecContext * codecCtxOrig = nullptr;
-    AVCodecContext * codecCtx = nullptr;
-
-    for (int i = 0; i < FormatCtx->nb_streams; i++) {
-        if (FormatCtx->streams[i]->codec->codec_type == AVMEDIA_TYPE_VIDEO){
-            video_stream = i;
+    
+    //Извлекаем инвормацию потока
+    if (avformat_find_stream_info(pFormatCtx, NULL) < 0)
+        return -1;
+    
+    //Печатаем информацию о файле в стандартный поток ошибок
+    av_dump_format(pFormatCtx, 0, argv[1], 0);
+    
+    //Ищем первый поток видео
+    videoStream = -1;
+    for (i = 0; i < pFormatCtx->nb_streams; i++)
+        if (pFormatCtx->streams[i]->codec->codec_type == AVMEDIA_TYPE_VIDEO)
+        {
+            videoStream = i;
             break;
         }
-    }
-
-    if (video_stream == -1)
+        
+    if (videoStream == -1)
         return -1;
-
-    codecCtx = FormatCtx->streams[video_stream]->codec;
-
-    AVCodec * pCodec = nullptr;
-    pCodec = avcodec_find_decoder(codecCtx->codec_id);
-    if (pCodec == NULL){
-        cerr << "UNSUPPORTED CODEC" << endl;
-        return -1;
-    }
-
-    codecCtx = avcodec_alloc_context3(pCodec);
-    if (avcodec_copy_context(codecCtx, codecCtxOrig) != 0)
+    
+    //Получаем на контекст кодека для видео потока
+    pCodecCtxOrig = pFormatCtx->streams[videoStream]->codec;
+    //Ищем декодер для видео потока
+    pCodec = avcodec_find_decoder(pCodecCtxOrig->codec_id);
+    if (pCodec == NULL)
     {
-        cerr << "Couldn't copy context" << endl;
+        cerr << "Unsupported codec!" << endl;
         return -1;
     }
-
-    if (avcodec_open2(codecCtx, pCodec, NULL) < 0)
+    
+    //Копируем контекст
+    pCodecCtx = avcodec_alloc_context3(pCodec);
+    if (avcodec_copy_context(pCodecCtx, pCodecCtxOrig) != 0)
     {
+        cerr << "Couldn't copy codec context";
         return -1;
     }
-
-    AVFrame * pFrame = nullptr;
+    
+    //Открываем кодек
+    if (avcodec_open2(pCodecCtx, pCodec, NULL) < 0)
+        return -1; //Не смог открыть кодек
+        
+    //Выделение памяти под video frame
     pFrame = av_frame_alloc();
-    if (pFrame == NULL)
-        return -1;
-
-    AVFrame * pFrameRGB = nullptr;
+    //Выделение памяти для AVFrame structure
     pFrameRGB = av_frame_alloc();
     if (pFrameRGB == NULL)
-        return -1;
-
-    uint8_t * buffer = nullptr;
-    int numBytes;
-    numBytes = avpicture_get_size(AVPixelFormat::AV_PIX_FMT_RGB24, codecCtx->width, codecCtx->height);
-    buffer = (uint8_t *)av_malloc(numBytes * sizeof (uint8_t));
-    avpicture_fill((AVPicture *)pFrameRGB, buffer, AV_PIX_FMT_RGB24, codecCtx->width, codecCtx->height);
-
-    struct SwsContext * sws_ctx = nullptr;
-    int frameFinished;
-    AVPacket packet;
-
-    sws_ctx = sws_getContext(codecCtx->width, codecCtx->height, codecCtx->pix_fmt, codecCtx->width, codecCtx->height, AV_PIX_FMT_RGB24, SWS_BILINEAR, NULL, NULL, NULL);
-    int i = 0;
-    while (av_read_frame(FormatCtx, &packet) >= 0)
+        return -1; //Память не выделенна
+        
+    //Определяем необходимый размер буфера и выделяем память под буфера
+    numBytes = avpicture_get_size(AV_PIX_FMT_RGB24, pCodecCtx->width,      pCodecCtx->height);
+    buffer = (uint8_t *)av_malloc(numBytes * sizeof(uint8_t));
+    avpicture_fill((AVPicture *)pFrameRGB, buffer, AV_PIX_FMT_RGB24, pCodecCtx->width, pCodecCtx->height);
+    //Инициализируем SWS Cpontext для програмног скалирования
+    sws_ctx = sws_getContext(pCodecCtx->width, pCodecCtx->height, pCodecCtx->pix_fmt, pCodecCtx->width, pCodecCtx->height, AV_PIX_FMT_RGB24, SWS_BILINEAR, NULL, NULL, NULL);
+    
+    //Читаем фреймы и сохраняем первые 5 фреймов на диск
+    i = 0;
+    while (av_read_frame(pFormatCtx, &packet) >= 0)
     {
-        if (packet.stream_index == video_stream)
+        //Этот пакет из видео потока?
+        if (packet.stream_index == videoStream)
         {
-            avcodec_decode_video2(codecCtx, pFrame, &frameFinished, &packet);
+            //Декодируем видео фреймы
+            avcodec_decode_video2(pCodecCtx, pFrame, &frameFinished, &packet);
+            
+            //Получили видео фрейм?
             if (frameFinished)
             {
-                sws_scale(sws_ctx, (uint8_t const * const *)pFrame->data, pFrame->linesize, 0, codecCtx->height, pFrameRGB->data, pFrameRGB->linesize);
+                //Конвертируем картинку из нативного формата в формат RGB
+                sws_scale(sws_ctx, (uint8_t const * const *)pFrame->data, pFrame->linesize, 0, pCodecCtx->height, pFrameRGB->data, pFrameRGB->linesize);
+                
+                //Сохраняем полученные фреймы на диск
                 if (++i <= 5)
-                    SaveFrame(pFrameRGB, codecCtx->width, codecCtx->height, i);
+                    SaveFrame(pFrameRGB, pCodecCtx->width, pCodecCtx->height, i);
             }
         }
+        //Освобождаем packet которому распределили память из кучи функцией av_read_frame
         av_free_packet(&packet);
     }
-
-    // Free the RGB image
+    //Освобождаем память выделенную под RGB image
     av_free(buffer);
-    av_free(pFrameRGB);
-
-    // Free the YUV frame
-    av_free(pFrame);
-
-    // Close the codecs
-    avcodec_close(codecCtx);
-    avcodec_close(codecCtxOrig);
-
-    // Close the video file
-    avformat_close_input(&FormatCtx);
+    av_frame_free(&pFrameRGB);
+    
+    //Освобождаем YUV frame
+    av_frame_free(&pFrame);
+    
+    //Закрываем кодеки
+    avcodec_close(pCodecCtx);
+    avcodec_close(pCodecCtxOrig);
+    
+    //Закрываем видео файл
+    avformat_close_input(&pFormatCtx);
+    
     return 0;
 }
